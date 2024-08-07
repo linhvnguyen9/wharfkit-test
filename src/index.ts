@@ -9,6 +9,7 @@ import {
   Cancelable,
   Canceled,
   ChainDefinition,
+  CompressionType,
   Name,
   PackedTransaction,
   PermissionLevel,
@@ -16,6 +17,7 @@ import {
   Serializer,
   Session,
   Signature,
+  SignedTransaction,
   SigningRequest,
   SigningRequestCreateArguments,
   Struct,
@@ -26,6 +28,7 @@ import {
 } from '@wharfkit/session'
 import { TransactPluginResourceProvider } from "@wharfkit/transact-plugin-resource-provider";
 import { WalletPluginPrivateKey } from "@wharfkit/wallet-plugin-privatekey";
+import { sign } from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -38,7 +41,7 @@ const chain = {
   url: "https://jungle4.greymass.com",
 }
 
-const permissionName = "test"
+const permissionName = "active"
 
 const walletPlugin = new WalletPluginPrivateKey(privateKey)
 
@@ -73,26 +76,13 @@ const transferAction = {
   },
 }
 
-class Transfer extends Struct {
-  static abiName = "transfer"
-  static abiFields = [
-    {
-      name: "from",
-      type: Name,
-    },
-    {
-      name: "to",
-      type: Name,
-    },
-    {
-      name: "quantity",
-      type: Asset,
-    },
-    {
-      name: "memo",
-      type: "string",
-    },
-  ]
+
+@Struct.type('transfer')
+export class Transfer extends Struct {
+    @Struct.field(Name) from!: Name
+    @Struct.field(Name) to!: Name
+    @Struct.field(Asset) quantity!: Asset
+    @Struct.field('string') memo!: string
 }
 
 @Struct.type("propose")
@@ -103,7 +93,7 @@ class Propose extends Struct {
   @Struct.field("transaction") trx!: Transaction
 }
 
-console.log(transactPlugin);
+// console.log(transactPlugin);
 
 (async () => {
   // const result = await session.transact({ action: transferAction })
@@ -136,11 +126,28 @@ console.log(transactPlugin);
   }
 
   // Test msig data
-  // const msigAbi = await client.v1.chain.get_abi("eosio.msig")
-  // if (msigAbi.abi) {
-  //   const data = "23231"
-  //   Serializer.decode({data: data, abi: msigAbi.abi, type: "propose"})
-  // }
+  const msigAbi = await client.v1.chain.get_abi("eosio.msig")
+  if (msigAbi.abi) {
+    const data = "b0cdcd512f85cc6500ae9a9c2a364d4301b0cdcd512f85cc65000000000090b1cab3177d5d000000000000000000000100a6823403ea3055000000572d3ccdcd010100000000000000020000000000000021b0cdcd512f85cc653037bdd544c3a691e80300000000000004454f53000000000000"
+    const decodedMsig = Serializer.decode({data: data, abi: msigAbi.abi, type: "propose"})
+    console.log(Serializer.objectify(decodedMsig));
+
+    const fullPackedTrx = {
+      signatures: [
+        'SIG_K1_KVSopXV6cANB1yMmgj46PBo1SujoZHpW2vjc8u7nxzz1Dxu4CoqxBurqC8yA4KaGR6aXcbdRq2E9YuqLyCdzAWn5k3HDAM'
+      ],
+      compression: 0,
+      packed_context_free_data: '00',
+      packed_trx: '154bb36650ff6f50e0ce00000000010000735802ea305500000040615ae9ad010100000000000000020000000000000074b0cdcd512f85cc6500ae9a9c2a364d4301b0cdcd512f85cc65000000000090b1ca134bb36650ff6f50e0ce000000000100a6823403ea3055000000572d3ccdcd010100000000000000020000000000000021b0cdcd512f85cc653037bdd544c3a691e80300000000000004454f5300000000000000'
+    }
+    const packedTransaction = PackedTransaction.from(fullPackedTrx)
+    const transaction = packedTransaction.getTransaction()
+    const decoded = transaction.actions[0].decodeData(msigAbi.abi)
+    console.log("Decoded packed multisig transaction")
+    console.log(Serializer.objectify(decoded));
+    console.log(Serializer.objectify(decoded).trx.actions[0]);
+    console.log(Serializer.objectify(decoded).trx.actions[0].authorization[0].actor.toString());
+  }
 
   // From data to serialized data
   const msigContract = await contractKit.load("eosio.msig")
@@ -152,30 +159,42 @@ console.log(transactPlugin);
     memo: "",
   })
   const sendAction = tokenContract.action("transfer", sendObj)
-  // const proposeObj = Propose.from({
-    
-  // })
-  const proposeAction = msigContract.action("propose", {
+  const infoFirst = await client.v1.chain.get_info()
+  const headerFirst = infoFirst.getTransactionHeader()
+  const transactionFirst = Transaction.from({
+    ...headerFirst,
+    actions: [sendAction],
+  })
+  const proposeObj = {
     proposer: accountName,
-    proposal_name: 'changeowner',
+    proposal_name: 'kdiespxdwas1',
     requested: [
       {
         actor: accountName,
         permission: permissionName,
       }
     ],
-    trx: {
-      expiration: '2019-09-14T16:39:15',
-      ref_block_num: 0,
-      ref_block_prefix: 0,
-      max_net_usage_words: 0,
-      max_cpu_usage_ms: 0,
-      delay_sec: 0,
-      context_free_actions: [],
-      actions: [sendAction],
-      transaction_extensions: []
-    }
-  })
+    trx: transactionFirst
+  }
+  const proposeAction = msigContract.action("propose", proposeObj)
   console.log("Send action data " + sendAction.data)
+  console.log("Propose action" + Serializer.objectify(proposeAction))
   console.log("Propose action data " + proposeAction.data)
+
+  const info = await client.v1.chain.get_info()
+  const header = info.getTransactionHeader()
+  const transaction = Transaction.from({
+    ...header,
+    actions: [proposeAction],
+  })
+  const signature = await session.signTransaction(transaction)
+  const signedTransaction = SignedTransaction.from({
+    ...transaction,
+    signatures: signature,
+  })
+  const packedTransaction = PackedTransaction.fromSigned(signedTransaction, CompressionType.none)
+  console.log(Serializer.objectify(packedTransaction))
+  const actualTransaction = await session.transact(transaction)
+  console.log("Actual transaction")
+  console.log(actualTransaction)
 })();
